@@ -273,6 +273,12 @@ int ssl3_read_n(SSL *s, int n, int max, int extend)
 	return(n);
 	}
 
+/* MAX_EMPTY_RECORDS defines the number of consecutive, empty records that will
+ * be processed per call to ssl3_get_record. Without this limit an attacker
+ * could send empty records at a faster rate than we can process and cause
+ * ssl3_get_record to loop forever. */
+#define MAX_EMPTY_RECORDS 32
+
 /* Call this to get a new input record.
  * It will return <= 0 if more data is needed, normally due to an error
  * or non-blocking IO.
@@ -293,6 +299,7 @@ static int ssl3_get_record(SSL *s)
 	short version;
 	unsigned mac_size, orig_len;
 	size_t extra;
+	unsigned empty_record_count = 0;
 
 	rr= &(s->s3->rrec);
 	sess=s->session;
@@ -523,7 +530,17 @@ printf("\n");
 	s->packet_length=0;
 
 	/* just read a 0 length packet */
-	if (rr->length == 0) goto again;
+	if (rr->length == 0)
+		{
+		empty_record_count++;
+		if (empty_record_count > MAX_EMPTY_RECORDS)
+			{
+			al=SSL_AD_UNEXPECTED_MESSAGE;
+			SSLerr(SSL_F_SSL3_GET_RECORD,SSL_R_RECORD_TOO_SMALL);
+			goto f_err;
+			}
+		goto again;
+		}
 
 #if 0
 fprintf(stderr, "Ultimate Record type=%d, Length=%d\n", rr->type, rr->length);
@@ -632,9 +649,6 @@ int ssl3_write_bytes(SSL *s, int type, const void *buf_, int len)
 		    !s->s3->record_split_done)
 			{
 			fragment = 1;
-			/* The first byte will be in its own record, so we
-			 * can write an extra byte. */
-			max++;
 			/* record_split_done records that the splitting has
 			 * been done in case we hit an SSL_WANT_WRITE condition.
 			 * In that case, we don't need to do the split again. */
@@ -650,6 +664,8 @@ int ssl3_write_bytes(SSL *s, int type, const void *buf_, int len)
 		if (i <= 0)
 			{
 			s->s3->wnum=tot;
+			/* Try to write the fragment next time. */
+			s->s3->record_split_done = 0;
 			return i;
 			}
 
@@ -701,7 +717,7 @@ static int do_ssl3_write(SSL *s, int type, const unsigned char *buf,
 		/* if it went, fall through and send more stuff */
 		}
 
- 	if (wb->buf == NULL)
+	if (wb->buf == NULL)
 		if (!ssl3_setup_write_buffer(s))
 			return -1;
 
@@ -980,7 +996,7 @@ int ssl3_read_bytes(SSL *s, int type, unsigned char *buf, int len, int peek)
 		if (!ssl3_setup_read_buffer(s))
 			return(-1);
 
-	if ((type && (type != SSL3_RT_APPLICATION_DATA) && (type != SSL3_RT_HANDSHAKE) && type) ||
+	if ((type && (type != SSL3_RT_APPLICATION_DATA) && (type != SSL3_RT_HANDSHAKE)) ||
 	    (peek && (type != SSL3_RT_APPLICATION_DATA)))
 		{
 		SSLerr(SSL_F_SSL3_READ_BYTES, ERR_R_INTERNAL_ERROR);
